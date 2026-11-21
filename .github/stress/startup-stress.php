@@ -5,7 +5,7 @@ declare(strict_types=1);
 /*
  * Stress test for concurrent worker startup on a fresh database file.
  *
- * Usage: php startup-stress.php [iterations=50] [concurrency=8] [cpu-burners=0]
+ * Usage: php startup-stress.php [iterations=50] [concurrency=8] [cpu-burners=0] [io-burners=0]
  *
  * Each iteration starts <concurrency> connections at once (like two Symfony AmpSql transports calling setup()
  * concurrently) on a new file, runs one statement on each, and closes them. Failures are grouped by message and by the
@@ -19,15 +19,26 @@ use Fabpot\Amp\Sqlite\SqliteTransactionMode;
 use function Amp\async;
 use function Amp\Future\awaitAll;
 
-require $argv[4] ?? \dirname(__DIR__, 2) . '/vendor/autoload.php';
+require \dirname(__DIR__, 2) . '/vendor/autoload.php';
 
 $iterations = (int) ($argv[1] ?? 50);
 $concurrency = (int) ($argv[2] ?? 8);
 $burners = (int) ($argv[3] ?? 0);
+$ioBurners = (int) ($argv[4] ?? 0);
 
 $burnerProcesses = [];
 for ($i = 0; $i < $burners; ++$i) {
     $burnerProcesses[] = \proc_open([\PHP_BINARY, '-r', '$e = microtime(true) + 3600; while (microtime(true) < $e) {}'], [], $pipes);
+}
+// Heavy file I/O: each burner rewrites and fsyncs a 4 MiB file in the temp directory, and churns small files
+for ($i = 0; $i < $ioBurners; ++$i) {
+    $burnerProcesses[] = \proc_open([\PHP_BINARY, '-r', <<<'IO'
+        $f = sys_get_temp_dir() . '/amp-sqlite-io-' . getmypid(); $chunk = random_bytes(65536); $e = microtime(true) + 3600;
+        while (microtime(true) < $e) {
+            $h = fopen($f, 'w'); for ($j = 0; $j < 64; ++$j) { fwrite($h, $chunk); } fflush($h); fsync($h); fclose($h);
+            for ($j = 0; $j < 20; ++$j) { file_put_contents("$f-$j", $chunk); @unlink("$f-$j"); }
+        }
+        IO], [], $pipes);
 }
 
 $directory = \sys_get_temp_dir() . '/amp-sqlite-stress-' . \bin2hex(\random_bytes(4));
@@ -84,4 +95,4 @@ foreach ($burnerProcesses as $process) {
 foreach ($failures as $message => $count) {
     echo "{$count}x {$message}\n";
 }
-\printf("RESULT failures=%d attempts=%d iterations=%d concurrency=%d burners=%d seconds=%.1f\n", $failureCount, $attempts, $iterations, $concurrency, $burners, \microtime(true) - $start);
+\printf("RESULT failures=%d attempts=%d iterations=%d concurrency=%d burners=%d io=%d seconds=%.1f\n", $failureCount, $attempts, $iterations, $concurrency, $burners, $ioBurners, \microtime(true) - $start);

@@ -60,6 +60,15 @@ jobs:
       - name: Stress, 8 concurrent + 2 CPU burners
         run: php .github/stress/startup-stress.php 40 8 2
 
+      - name: Stress, 16 concurrent + 4 I/O burners
+        run: php .github/stress/startup-stress.php 60 16 0 4
+
+      - name: Stress, 32 concurrent + 2 CPU + 6 I/O burners
+        run: php .github/stress/startup-stress.php 40 32 2 6
+
+      - name: Stress, 2 concurrent + 4 CPU + 6 I/O burners (Symfony shape under load)
+        run: php .github/stress/startup-stress.php 300 2 4 6
+
       - name: Full test suite
         if: matrix.variant == 'after-patch'
         continue-on-error: true
