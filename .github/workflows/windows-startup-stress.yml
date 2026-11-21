@@ -1,0 +1,66 @@
+name: Windows startup stress
+
+on:
+  push:
+    branches: [fix-startup-busy-retry]
+  workflow_dispatch:
+
+jobs:
+  stress:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [before-v1.1.0, after-patch]
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Use v1.1.0 sources (before)
+        if: matrix.variant == 'before-v1.1.0'
+        run: |
+          git fetch --tags --force
+          git checkout v1.1.0 -- src
+          git status --short
+
+      - name: Install PHP 8.4.1 x86 (same build as Symfony's lowest-php job)
+        run: |
+          Invoke-WebRequest -Uri https://github.com/symfony-tools/binary-utils/releases/download/v0.1/php-8.4.1-Win32-vs17-x86.zip -OutFile php.zip
+          Expand-Archive php.zip -DestinationPath C:\php84
+          Copy-Item C:\php84\php.ini-development C:\php84\php.ini
+          Add-Content C:\php84\php.ini "extension_dir=C:\php84\ext`nextension=sqlite3`nextension=mbstring`nextension=openssl`nzend.assertions=1`nassert.exception=1`nmemory_limit=-1"
+          "C:\php84" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Show PHP
+        run: |
+          php -v
+          php -r "echo PHP_INT_SIZE, ' ', SQLite3::version()['versionString'], PHP_EOL;"
+          php -m
+
+      - name: Composer install
+        run: |
+          php -r "copy('https://getcomposer.org/download/latest-2.x/composer.phar', 'composer.phar');"
+          php composer.phar install --no-interaction --prefer-dist --no-progress
+
+      - name: Regression test (journal mode change blocked by another connection)
+        continue-on-error: true
+        run: php vendor/bin/phpunit --filter "testStartupRetriesBusyJournalModeChangeUntilBusyTimeout|testConcurrentConnectionsCanInitializeNewDatabase" tests/SqliteConnectionTest.php
+
+      - name: Stress, 2 concurrent (Symfony testSetupIsIdempotent shape)
+        run: php .github/stress/startup-stress.php 150 2 0
+
+      - name: Stress, 8 concurrent
+        run: php .github/stress/startup-stress.php 60 8 0
+
+      - name: Stress, 8 concurrent + 2 CPU burners
+        run: php .github/stress/startup-stress.php 40 8 2
+
+      - name: Full test suite
+        if: matrix.variant == 'after-patch'
+        continue-on-error: true
+        run: php vendor/bin/phpunit
