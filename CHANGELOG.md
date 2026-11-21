@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Retry SQLITE_BUSY during the whole connection startup (not only the WAL switch), within the busy timeout, so concurrent connections initializing the same file no longer fail with "database is locked"
+
 ## 1.1.0
 
 - Count only rows changed directly by INSERT, UPDATE, and DELETE statements, so trigger writes, virtual table internals, and CREATE TABLE AS SELECT no longer count
