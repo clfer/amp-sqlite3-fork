@@ -132,16 +132,21 @@ final class WorkerProcess
         $this->database->busyTimeout($open['busy_timeout']);
         $this->batchSize = $open['batch_size'];
 
-        $this->applyPragma('trusted_schema', $open['trusted_schema']);
-        $this->applyPragma('foreign_keys', $open['foreign_keys']);
+        // SQLite does not always invoke the busy handler while connections race to initialize the same file (journal
+        // mode changes, schema reads right after another process switched to WAL), so the whole startup sequence
+        // retries SQLITE_BUSY until the configured busy timeout elapses
+        $deadline = \hrtime(true) + $open['busy_timeout'] * 1_000_000;
+
+        $this->applyStartupPragma('trusted_schema', $open['trusted_schema'], $deadline);
+        $this->applyStartupPragma('foreign_keys', $open['foreign_keys'], $deadline);
 
         // Pragmas such as page_size only take effect before WAL mode is enabled
         foreach ($open['pragmas'] as $name => $value) {
-            $this->applyPragma($name, $value);
+            $this->applyStartupPragma($name, $value, $deadline);
         }
 
-        $this->applyJournalMode($open);
-        $this->applySynchronousMode($open);
+        $this->applyJournalMode($open, $deadline);
+        $this->applySynchronousMode($open, $deadline);
 
         $this->registerFunctions($open['functions']);
         $this->registerAggregates($open['aggregates']);
@@ -1089,32 +1094,34 @@ final class WorkerProcess
     /**
      * @param SqliteOpenConfig $open
      */
-    private function applyJournalMode(#[\SensitiveParameter] array $open): void
+    private function applyJournalMode(#[\SensitiveParameter] array $open, int|float $deadline): void
     {
         if ($open['journal_mode'] !== SqliteJournalMode::Automatic->value) {
-            $effective = $open['journal_mode'] === SqliteJournalMode::Wal->value
-                ? $this->enableWal($open['busy_timeout'])
-                : $this->applyPragma('journal_mode', $open['journal_mode']);
+            $effective = $this->applyStartupPragma('journal_mode', $open['journal_mode'], $deadline);
             if (\strtolower((string) $effective) !== $open['journal_mode']) {
                 throw new \RuntimeException("Could not enable requested journal mode '{$open['journal_mode']}'");
             }
         } elseif ($open['path'] !== ':memory:' && $open['open_mode'] !== SqliteOpenMode::ReadOnly->name) {
-            $effective = $this->enableWal($open['busy_timeout']);
+            $effective = $this->applyStartupPragma('journal_mode', 'wal', $deadline);
             if (\strtolower((string) $effective) !== 'wal') {
                 throw new \RuntimeException("Could not enable WAL journal mode, SQLite selected '{$effective}'");
             }
         }
     }
 
-    private function enableWal(int $busyTimeout): null|bool|int|float|string
+    /**
+     * Retries SQLITE_BUSY until the deadline: a statement that failed with SQLITE_BUSY had no effect.
+     */
+    private function applyStartupPragma(string $name, #[\SensitiveParameter] bool|int|float|string $value, int|float $deadline): null|bool|int|float|string
     {
-        $deadline = \hrtime(true) + $busyTimeout * 1_000_000;
-
         do {
             try {
-                return $this->applyPragma('journal_mode', 'wal');
+                return $this->applyPragma($name, $value);
             } catch (\SQLite3Exception $exception) {
-                if (($exception->getCode() & 0xFF) !== self::SQLITE_BUSY || \hrtime(true) >= $deadline) {
+                // Mask extended result codes (SQLITE_BUSY_RECOVERY, SQLITE_BUSY_SNAPSHOT, ...), and fall back to the
+                // connection's error code in case the exception does not carry one
+                $code = $exception->getCode() ?: $this->database->lastErrorCode();
+                if (($code & 0xFF) !== self::SQLITE_BUSY || \hrtime(true) >= $deadline) {
                     throw $exception;
                 }
             }
@@ -1126,15 +1133,15 @@ final class WorkerProcess
     /**
      * @param SqliteOpenConfig $open
      */
-    private function applySynchronousMode(#[\SensitiveParameter] array $open): void
+    private function applySynchronousMode(#[\SensitiveParameter] array $open, int|float $deadline): void
     {
         if ($open['synchronous_mode'] !== SqliteSynchronousMode::Automatic->value) {
-            $this->applyPragma('synchronous', $open['synchronous_mode']);
+            $this->applyStartupPragma('synchronous', $open['synchronous_mode'], $deadline);
         } elseif ($open['path'] !== ':memory:'
             && $open['open_mode'] !== SqliteOpenMode::ReadOnly->name
             && ($open['journal_mode'] === SqliteJournalMode::Automatic->value || $open['journal_mode'] === SqliteJournalMode::Wal->value)
         ) {
-            $this->applyPragma('synchronous', 'normal');
+            $this->applyStartupPragma('synchronous', 'normal', $deadline);
         }
     }
 
