@@ -82,6 +82,15 @@ jobs:
           REPRO_CLOSE_HOLD_MS: '6000'
         run: php .github/repro/reuse-after-close.php 5000
 
+      # Windows: starting a child takes ~1 s and the busy handler's sleeps round up to the timer tick, so the hold must
+      # outlast startup plus more than 5 s of real busy waiting
+      - name: Reuse after close, old child holds the lock 15 s (expected FAIL with the CI message)
+        timeout-minutes: 3
+        continue-on-error: true
+        env:
+          REPRO_CLOSE_HOLD_MS: '15000'
+        run: php .github/repro/reuse-after-close.php 5000
+
       - name: Reuse after an awaited close, old child holds the lock 6 s (expected OK)
         timeout-minutes: 3
         continue-on-error: true
@@ -93,16 +102,19 @@ jobs:
         run: Move-Item -Force WorkerProcess.php.orig src/Internal/WorkerProcess.php
 
       - name: Timed testSetupIsIdempotent shape, no load (3 min)
+        if: ${{ !contains(github.event.head_commit.message, '[skip-timed]') }}
         timeout-minutes: 8
         continue-on-error: true
         run: php .github/repro/setup-idempotent-timed.php 180 0 0
 
       - name: Timed testSetupIsIdempotent shape, 4 CPU + 6 I/O burners (5 min)
+        if: ${{ !contains(github.event.head_commit.message, '[skip-timed]') }}
         timeout-minutes: 10
         continue-on-error: true
         run: php .github/repro/setup-idempotent-timed.php 300 4 6
 
       - name: Timed testSetupIsIdempotent shape, 8 CPU + 12 I/O burners (5 min)
+        if: ${{ !contains(github.event.head_commit.message, '[skip-timed]') }}
         timeout-minutes: 10
         continue-on-error: true
         run: php .github/repro/setup-idempotent-timed.php 300 8 12
