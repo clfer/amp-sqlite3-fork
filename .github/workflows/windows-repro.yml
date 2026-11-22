@@ -98,6 +98,44 @@ jobs:
           REPRO_CLOSE_HOLD_MS: '6000'
         run: php .github/repro/reuse-after-awaited-close.php 5000
 
+      - name: Await pool onClose, sql-common v2.0.5, old child holds the lock 15 s
+        timeout-minutes: 3
+        continue-on-error: true
+        env:
+          REPRO_CLOSE_HOLD_MS: '15000'
+        run: |
+          php -r "echo json_decode(file_get_contents('vendor/composer/installed.json'), true)['packages'][array_search('amphp/sql-common', array_column(json_decode(file_get_contents('vendor/composer/installed.json'), true)['packages'], 'name'))]['version'], PHP_EOL;"
+          php .github/repro/onclose-lock.php . 5000
+
+      - name: Swap in clfer/sql-common fix-pool-close-await-connections @ 6f9a4fe
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          git clone -q -b fix-pool-close-await-connections https://github.com/clfer/sql-common.git ..\sql-common-fix
+          git -C ..\sql-common-fix checkout -q 6f9a4fe01c6b354e77321c293a36006d5cad64e6
+          git -C ..\sql-common-fix log --oneline -1
+          Copy-Item vendor\amphp\sql-common\src sql-common-src.orig -Recurse
+          Remove-Item vendor\amphp\sql-common\src -Recurse -Force
+          Copy-Item ..\sql-common-fix\src vendor\amphp\sql-common\src -Recurse
+          Select-String -Path vendor\amphp\sql-common\src\SqlCommonConnectionPool.php -Pattern 'awaitAll'
+
+      - name: Await pool onClose, sql-common fix @ 6f9a4fe, old child holds the lock 15 s
+        timeout-minutes: 3
+        continue-on-error: true
+        env:
+          REPRO_CLOSE_HOLD_MS: '15000'
+        run: php .github/repro/onclose-lock.php . 5000
+
+      - name: Await pool onClose, sql-common fix @ 6f9a4fe, no hold
+        timeout-minutes: 3
+        continue-on-error: true
+        run: php .github/repro/onclose-lock.php . 5000
+
+      - name: Restore sql-common v2.0.5
+        run: |
+          Remove-Item vendor\amphp\sql-common\src -Recurse -Force
+          Move-Item sql-common-src.orig vendor\amphp\sql-common\src
+
       - name: Remove the slow-close injection
         run: Move-Item -Force WorkerProcess.php.orig src/Internal/WorkerProcess.php
 
