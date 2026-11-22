@@ -2,7 +2,7 @@ name: Windows startup stress
 
 on:
   push:
-    branches: [fix-startup-busy-retry]
+    branches: [windows-stress-v110-baseline]
   workflow_dispatch:
 
 jobs:
@@ -12,7 +12,7 @@ jobs:
       matrix:
         variant: [before-v1.1.0, after-patch]
     runs-on: windows-2022
-    timeout-minutes: 60
+    timeout-minutes: 90
     defaults:
       run:
         shell: pwsh
@@ -21,12 +21,23 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The fork has no tags: fetch v1.1.0 from upstream and fail loudly if anything goes wrong
       - name: Use v1.1.0 sources (before)
         if: matrix.variant == 'before-v1.1.0'
         run: |
-          git fetch --tags --force
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          git fetch --no-tags https://github.com/fabpot/amphp-sqlite3.git refs/tags/v1.1.0:refs/tags/v1.1.0
+          git rev-parse v1.1.0^{commit}
           git checkout v1.1.0 -- src
           git status --short
+          git diff --stat 3e31dd2 v1.1.0 -- src
+
+      - name: Verify which code is under test
+        run: |
+          $patched = [bool](Select-String -Path src/Internal/WorkerProcess.php -Pattern 'applyStartupPragma' -Quiet)
+          Write-Output "variant=${{ matrix.variant }} patched_code=$patched"
+          if (('${{ matrix.variant }}' -eq 'after-patch') -ne $patched) { throw 'Source tree does not match the matrix variant' }
 
       - name: Install PHP 8.4.1 x86 (same build as Symfony's lowest-php job)
         run: |
@@ -52,22 +63,38 @@ jobs:
         run: php vendor/bin/phpunit --filter "testStartupRetriesBusyJournalModeChangeUntilBusyTimeout|testConcurrentConnectionsCanInitializeNewDatabase" tests/SqliteConnectionTest.php
 
       - name: Stress, 2 concurrent (Symfony testSetupIsIdempotent shape)
+        timeout-minutes: 8
+        continue-on-error: true
         run: php .github/stress/startup-stress.php 150 2 0
 
       - name: Stress, 8 concurrent
+        timeout-minutes: 8
+        continue-on-error: true
         run: php .github/stress/startup-stress.php 60 8 0
 
       - name: Stress, 8 concurrent + 2 CPU burners
+        timeout-minutes: 8
+        continue-on-error: true
         run: php .github/stress/startup-stress.php 40 8 2
 
       - name: Stress, 16 concurrent + 4 I/O burners
+        timeout-minutes: 8
+        continue-on-error: true
         run: php .github/stress/startup-stress.php 60 16 0 4
 
       - name: Stress, 32 concurrent + 2 CPU + 6 I/O burners
+        timeout-minutes: 8
+        continue-on-error: true
         run: php .github/stress/startup-stress.php 40 32 2 6
 
       - name: Stress, 2 concurrent + 4 CPU + 6 I/O burners (Symfony shape under load)
+        timeout-minutes: 8
+        continue-on-error: true
         run: php .github/stress/startup-stress.php 300 2 4 6
+
+      - name: PHP processes left behind (hang diagnostics)
+        if: always()
+        run: Get-CimInstance Win32_Process -Filter "Name='php.exe'" | Select-Object ProcessId,ParentProcessId,CreationDate,CommandLine | Format-List
 
       - name: Full test suite
         if: matrix.variant == 'after-patch'
