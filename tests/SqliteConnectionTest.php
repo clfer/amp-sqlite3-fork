@@ -23,6 +23,7 @@ use Fabpot\Amp\Sqlite\SqliteJournalMode;
 use Fabpot\Amp\Sqlite\SqliteOpenMode;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use Revolt\EventLoop;
 use function Amp\async;
 use function Amp\delay;
 
@@ -199,6 +200,31 @@ final class SqliteConnectionTest extends TestCase
             foreach ($connections as $connection) {
                 $connection->close();
             }
+            @\unlink($path);
+            @\unlink($path . '-shm');
+            @\unlink($path . '-wal');
+        }
+    }
+
+    public function testStartupRetriesBusyJournalModeChangeUntilBusyTimeout(): void
+    {
+        $path = \sys_get_temp_dir() . '/amp-sqlite-' . \bin2hex(\random_bytes(8)) . '.sqlite';
+        $holder = new \SQLite3($path);
+        $holder->exec('PRAGMA journal_mode = wal');
+        $holder->exec('CREATE TABLE t (x)');
+        // An open WAL connection keeps a shared lock, so leaving WAL mode fails with SQLITE_BUSY without waiting
+        $holder->querySingle('SELECT count(*) FROM t');
+        EventLoop::delay(0.5, static function () use ($holder): void {
+            $holder->close();
+        });
+
+        $config = (new SqliteConfig($path))->withJournalMode(SqliteJournalMode::Delete)->withBusyTimeout(10_000);
+        $connection = (new SqliteConnector())->connect($config);
+
+        try {
+            self::assertSame(['journal_mode' => 'delete'], $connection->query('PRAGMA journal_mode')->fetchRow());
+        } finally {
+            $connection->close();
             @\unlink($path);
             @\unlink($path . '-shm');
             @\unlink($path . '-wal');
