@@ -21,17 +21,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      # The fork has no tags: fetch v1.1.0 from upstream and fail loudly if anything goes wrong
+      # The fork has no tags. v1.1.0 is commit 3e31dd28 (Packagist metadata for fabpot/amphp-sqlite3 v1.1.0,
+      # source github.com/fabpot/amp-sqlite3), which is in this branch's history
       - name: Use v1.1.0 sources (before)
         if: matrix.variant == 'before-v1.1.0'
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          git fetch --no-tags https://github.com/fabpot/amphp-sqlite3.git refs/tags/v1.1.0:refs/tags/v1.1.0
-          git rev-parse v1.1.0^{commit}
-          git checkout v1.1.0 -- src
+          git checkout 3e31dd28dc8f4c14e4739f81f0ca5f6d3c3f148d -- src
           git status --short
-          git diff --stat 3e31dd2 v1.1.0 -- src
 
       - name: Verify which code is under test
         run: |
