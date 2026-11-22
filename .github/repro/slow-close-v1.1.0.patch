@@ -1,0 +1,17 @@
+--- a/src/Internal/WorkerProcess.php	2026-09-29 13:19:20.000000000 +0000
++++ b/src/Internal/WorkerProcess.php	2026-11-22 13:19:30.060173730 +0000
+@@ -372,6 +372,14 @@
+ 
+     private function close(): null
+     {
++        // REPRO ONLY: simulate a slow last-connection close (checkpoint under the exclusive file lock)
++        $holdMs = (int) \getenv('REPRO_CLOSE_HOLD_MS');
++        if ($holdMs > 0) {
++            $this->database->exec('PRAGMA locking_mode = EXCLUSIVE');
++            $this->database->exec('BEGIN EXCLUSIVE');
++            $this->database->exec('COMMIT');
++            \usleep($holdMs * 1000);
++        }
+         $this->shutdown();
+ 
+         return null;

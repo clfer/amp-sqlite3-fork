@@ -1,0 +1,112 @@
+name: Windows repro (pool close race, timed setup)
+
+on:
+  push:
+    branches: [repro-pool-close-race]
+  workflow_dispatch:
+
+jobs:
+  repro:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [before-v1.1.0, after-patch]
+    runs-on: windows-2022
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # v1.1.0 is commit 3e31dd28 (Packagist metadata for fabpot/amphp-sqlite3 v1.1.0, source github.com/fabpot/amp-sqlite3)
+      - name: Use v1.1.0 sources (before)
+        if: matrix.variant == 'before-v1.1.0'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          git checkout 3e31dd28dc8f4c14e4739f81f0ca5f6d3c3f148d -- src
+          git status --short
+
+      - name: Verify which code is under test
+        run: |
+          $patched = [bool](Select-String -Path src/Internal/WorkerProcess.php -Pattern 'applyStartupPragma' -Quiet)
+          Write-Output "variant=${{ matrix.variant }} patched_code=$patched"
+          if (('${{ matrix.variant }}' -eq 'after-patch') -ne $patched) { throw 'Source tree does not match the matrix variant' }
+
+      - name: Install PHP 8.4.1 x86 (same build as Symfony's lowest-php job)
+        run: |
+          Invoke-WebRequest -Uri https://github.com/symfony-tools/binary-utils/releases/download/v0.1/php-8.4.1-Win32-vs17-x86.zip -OutFile php.zip
+          Expand-Archive php.zip -DestinationPath C:\php84
+          Copy-Item C:\php84\php.ini-development C:\php84\php.ini
+          Add-Content C:\php84\php.ini "extension_dir=C:\php84\ext`nextension=sqlite3`nextension=mbstring`nextension=openssl`nzend.assertions=1`nassert.exception=1`nmemory_limit=-1"
+          "C:\php84" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Show PHP
+        run: |
+          php -v
+          php -r "echo PHP_INT_SIZE, ' ', SQLite3::version()['versionString'], PHP_EOL;"
+
+      - name: Composer install
+        run: |
+          php -r "copy('https://getcomposer.org/download/latest-2.x/composer.phar', 'composer.phar');"
+          php composer.phar install --no-interaction --prefer-dist --no-progress
+
+      - name: How long the child keeps the file open after pool close() returns
+        timeout-minutes: 5
+        continue-on-error: true
+        run: php .github/repro/close-window.php 50
+
+      # REPRO ONLY: the old child holds the exclusive file lock during close for REPRO_CLOSE_HOLD_MS (slow checkpoint)
+      - name: Inject slow close into the worker
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          Copy-Item src/Internal/WorkerProcess.php WorkerProcess.php.orig
+          git apply --ignore-whitespace .github/repro/slow-close-v1.1.0.patch
+          Select-String -Path src/Internal/WorkerProcess.php -Pattern 'REPRO_CLOSE_HOLD_MS'
+
+      - name: Reuse after close, old child holds the lock 1.5 s (expected OK)
+        timeout-minutes: 3
+        continue-on-error: true
+        env:
+          REPRO_CLOSE_HOLD_MS: '1500'
+        run: php .github/repro/reuse-after-close.php 5000
+
+      - name: Reuse after close, old child holds the lock 6 s (expected FAIL with the CI message)
+        timeout-minutes: 3
+        continue-on-error: true
+        env:
+          REPRO_CLOSE_HOLD_MS: '6000'
+        run: php .github/repro/reuse-after-close.php 5000
+
+      - name: Reuse after an awaited close, old child holds the lock 6 s (expected OK)
+        timeout-minutes: 3
+        continue-on-error: true
+        env:
+          REPRO_CLOSE_HOLD_MS: '6000'
+        run: php .github/repro/reuse-after-awaited-close.php 5000
+
+      - name: Remove the slow-close injection
+        run: Move-Item -Force WorkerProcess.php.orig src/Internal/WorkerProcess.php
+
+      - name: Timed testSetupIsIdempotent shape, no load (3 min)
+        timeout-minutes: 8
+        continue-on-error: true
+        run: php .github/repro/setup-idempotent-timed.php 180 0 0
+
+      - name: Timed testSetupIsIdempotent shape, 4 CPU + 6 I/O burners (5 min)
+        timeout-minutes: 10
+        continue-on-error: true
+        run: php .github/repro/setup-idempotent-timed.php 300 4 6
+
+      - name: Timed testSetupIsIdempotent shape, 8 CPU + 12 I/O burners (5 min)
+        timeout-minutes: 10
+        continue-on-error: true
+        run: php .github/repro/setup-idempotent-timed.php 300 8 12
+
+      - name: PHP processes left behind
+        if: always()
+        run: Get-CimInstance Win32_Process -Filter "Name='php.exe'" | Select-Object ProcessId,ParentProcessId,CreationDate,CommandLine | Format-List | Out-String -Width 400
